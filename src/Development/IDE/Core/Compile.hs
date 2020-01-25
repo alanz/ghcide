@@ -67,6 +67,7 @@ import           TcIface                        (typecheckIface)
 import           TidyPgm
 
 import Control.Exception.Safe
+-- import Control.Exception
 import Control.Monad.Extra
 import Control.Monad.Except
 import Control.Monad.Trans.Except
