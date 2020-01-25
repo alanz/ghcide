@@ -113,8 +113,9 @@ typecheckModule (IdeDefer defer) packageState deps pm =
                 dflags = ms_hspp_opts modSummary
             modSummary' <- initPlugins modSummary
             (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
-                GHC.typecheckModule $ enableTopLevelWarnings
+                GHC.typecheckModule -- $ enableTopLevelWarnings
                                     $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
+
             tcm2 <- mkTcModuleResult tcm
             let errorPipeline = unDefer . hideDiag dflags
             return (map errorPipeline warnings, tcm2)
@@ -285,12 +286,11 @@ loadModuleHome
     => TcModuleResult
     -> m ()
 loadModuleHome tmr = modifySession $ \e ->
-    e { hsc_HPT = addToHpt (hsc_HPT e) mod mod_info }
+      e { hsc_HPT = addToHpt (hsc_HPT e) mod mod_info }
   where
     ms       = pm_mod_summary . tm_parsed_module . tmrModule $ tmr
     mod_info = tmrModInfo tmr
     mod      = ms_mod_name ms
-
 
 
 -- | GhcMonad function to chase imports of a module given as a StringBuffer. Returns given module's
