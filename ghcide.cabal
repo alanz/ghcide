@@ -203,9 +203,6 @@ executable ghcide
     other-modules:
         Arguments
         Paths_ghcide
-        Rules
-        RuleTypes
-        Util
 
     default-extensions:
         BangPatterns
