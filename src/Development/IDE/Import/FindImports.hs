@@ -8,6 +8,7 @@ module Development.IDE.Import.FindImports
   ( locateModule
   , Import(..)
   , ArtifactsLocation(..)
+  , isBootLocation
   ) where
 
 import           Development.IDE.GHC.Error as ErrUtils
@@ -35,13 +36,17 @@ data Import
   deriving (Show)
 
 data ArtifactsLocation = ArtifactsLocation
-  { artifactFilePath :: !NormalizedFilePath
+  { artifactFilePath    :: !NormalizedFilePath
   , artifactModLocation :: !ModLocation
+  , artifactIsSource    :: !Bool          -- ^ True if a module is a source input
   }
     deriving (Show)
 
 instance NFData ArtifactsLocation where
-  rnf ArtifactsLocation{..} = rnf artifactFilePath `seq` rwhnf artifactModLocation
+  rnf ArtifactsLocation{..} = rnf artifactFilePath `seq` rwhnf artifactModLocation `seq` rnf artifactIsSource
+
+isBootLocation :: ArtifactsLocation -> Bool
+isBootLocation = not . artifactIsSource
 
 instance NFData Import where
   rnf (FileImport x) = rnf x
@@ -50,17 +55,17 @@ instance NFData Import where
 
 -- | locate a module in the file system. Where we go from *daml to Haskell
 locateModuleFile :: MonadIO m
-             => DynFlags
+             => [[FilePath]]
              -> [String]
              -> (NormalizedFilePath -> m Bool)
              -> Bool
              -> ModuleName
              -> m (Maybe NormalizedFilePath)
-locateModuleFile dflags exts doesExist isSource modName = do
-  let candidates =
+locateModuleFile import_dirss exts doesExist isSource modName = do
+  let candidates import_dirs =
         [ toNormalizedFilePath (prefix </> M.moduleNameSlashes modName <.> maybeBoot ext)
-           | prefix <- importPaths dflags, ext <- exts]
-  findM doesExist candidates
+           | prefix <- import_dirs , ext <- exts]
+  findM doesExist (concatMap candidates import_dirss)
   where
     maybeBoot ext
       | isSource = ext ++ "-boot"
@@ -71,17 +76,18 @@ locateModuleFile dflags exts doesExist isSource modName = do
 locateModule
     :: MonadIO m
     => DynFlags
+    -> [[FilePath]] -- Sets import directories to look in
     -> [String]
     -> (NormalizedFilePath -> m Bool)
     -> Located ModuleName
     -> Maybe FastString
     -> Bool
     -> m (Either [FileDiagnostic] Import)
-locateModule dflags exts doesExist modName mbPkgName isSource = do
+locateModule dflags import_paths exts doesExist modName mbPkgName isSource = do
   case mbPkgName of
     -- "this" means that we should only look in the current package
     Just "this" -> do
-      mbFile <- locateModuleFile dflags exts doesExist isSource $ unLoc modName
+      mbFile <- locateModuleFile [(importPaths dflags)] exts doesExist isSource $ unLoc modName
       case mbFile of
         Nothing -> return $ Left $ notFoundErr dflags modName $ LookupNotFound []
         Just file -> toModLocation file
@@ -90,14 +96,14 @@ locateModule dflags exts doesExist modName mbPkgName isSource = do
     Nothing -> do
       -- first try to find the module as a file. If we can't find it try to find it in the package
       -- database.
-      mbFile <- locateModuleFile dflags exts doesExist isSource $ unLoc modName
+      mbFile <- locateModuleFile import_paths exts doesExist isSource $ unLoc modName
       case mbFile of
         Nothing -> lookupInPackageDB dflags
         Just file -> toModLocation file
   where
     toModLocation file = liftIO $ do
         loc <- mkHomeModLocation dflags (unLoc modName) (fromNormalizedFilePath file)
-        return $ Right $ FileImport $ ArtifactsLocation file loc
+        return $ Right $ FileImport $ ArtifactsLocation file loc (not isSource)
 
 
     lookupInPackageDB dfs =
