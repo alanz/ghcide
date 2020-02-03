@@ -391,4 +391,3 @@ instance NFData NamedModuleDep where
 
 instance Show NamedModuleDep where
   show NamedModuleDep{..} = show nmdFilePath
-

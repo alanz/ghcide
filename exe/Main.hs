@@ -114,7 +114,7 @@ main = do
     dir <- IO.getCurrentDirectory
     command <- makeLspCommandId "typesignature.add"
 
-    let plugins = Completions.plugin <> CodeAction.plugin
+    let plugins = Completions.plugin -- <> CodeAction.plugin
         onInitialConfiguration = const $ Right ()
         onConfigurationChange  = const $ Right ()
         options = def { LSP.executeCommandCommands = Just [command]
@@ -165,7 +165,7 @@ main = do
 
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
-        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
+--        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
 --        results <- runActionSync ide $ use TypeCheck $ toNormalizedFilePath' "src/Development/IDE/Core/Rules.hs"
         {-
         let fp =  toNormalizedFilePath' "ghc/Main.hs"

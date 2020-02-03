@@ -206,6 +206,22 @@ typecheckParents nfp = do
     liftIO $ print (length revs)
     void $ uses GetModIface revs
 
+-- | Note that some buffer for a specific file has been modified but not
+-- with what changes.
+setFileModified :: IdeState -> NormalizedFilePath -> IO ()
+setFileModified state nfp = do
+    VFSHandle{..} <- getIdeGlobalState state
+    when (isJust setVirtualFileContents) $
+        fail "setSomethingModified can't be called on this type of VFSHandle"
+    shakeRunInternalKill "FileStoreTC" state [void (use TypeCheck nfp)
+                                             , delay "Propagate" (typecheckParents nfp) ]
+
+typecheckParents :: NormalizedFilePath -> Action ()
+typecheckParents nfp = do
+    revs <- reverseDependencies nfp <$> useNoFile_ GetModuleGraph
+    liftIO $ print (length revs)
+    void $ uses GetModIface revs
+
 -- | Note that some buffer somewhere has been modified, but don't say what.
 --   Only valid if the virtual file system was initialised by LSP, as that
 --   independently tracks which files are modified.

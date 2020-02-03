@@ -452,6 +452,7 @@ getModSummaryFromBuffer fp dflags parsed = do
 
 -- | Given a buffer, env and filepath, produce a module summary by parsing only the imports.
 --   Runs preprocessors as needed.
+<<<<<<< HEAD
 getModSummaryFromImports
   :: (HasDynFlags m, ExceptionMonad m, MonadIO m)
   => FilePath

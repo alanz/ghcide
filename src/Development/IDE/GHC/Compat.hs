@@ -290,8 +290,13 @@ getModuleHash = mi_mod_hash . mi_final_exts
 #else
 getModuleHash = mi_mod_hash
 #endif
+getModuleHash :: ModIface -> Fingerprint
+#if MIN_GHC_API_VERSION(8,10,0)
+getModuleHash = mi_mod_hash . mi_final_exts
+#else
+getModuleHash = mi_mod_hash
+#endif
 
 
 getPackageName :: DynFlags -> Module.InstalledUnitId -> Maybe PackageName
 getPackageName dfs i = packageName <$> lookupPackage dfs (Module.DefiniteUnitId (Module.DefUnitId i))
-
