@@ -9,6 +9,7 @@
 --   Given a list of paths to find libraries, and a file to compile, produce a list of 'CoreModule' values.
 module Development.IDE.Core.Compile
   ( TcModuleResult(..)
+  , RunSimplifier(..)
   , compileModule
   , parseModule
   , typecheckModule
@@ -16,7 +17,12 @@ module Development.IDE.Core.Compile
   , addRelativeImport
   , mkTcModuleResult
   , generateByteCode
+  , generateAndWriteHieFile
+  , generateAndWriteHiFile
   , loadHieFile
+  , loadInterface
+  , loadDepModule
+  , loadModuleHome
   ) where
 
 import Development.IDE.Core.RuleTypes
@@ -30,6 +36,7 @@ import Development.IDE.GHC.Util
 import qualified GHC.LanguageExtensions.Type as GHC
 import Development.IDE.Types.Options
 import Development.IDE.Types.Location
+import Outputable
 
 #if MIN_GHC_API_VERSION(8,6,0)
 import           DynamicLoading (initializePlugins)
@@ -45,21 +52,24 @@ import ErrUtils
 
 import           Finder
 import qualified Development.IDE.GHC.Compat     as GHC
+import qualified Development.IDE.GHC.Compat     as Compat
 import           GhcMonad
 import           GhcPlugins                     as GHC hiding (fst3, (<>))
 import qualified HeaderInfo                     as Hdr
 import           HscMain                        (hscInteractive, hscSimplify)
+import           LoadIface                      (readIface)
+import qualified Maybes
 import           MkIface
 import           NameCache
 import           StringBuffer                   as SB
-import           TcRnMonad (tcg_th_coreplugins)
+import           TcRnMonad (initIfaceLoad, tcg_th_coreplugins)
+import           TcIface                        (typecheckIface)
 import           TidyPgm
 
+import Control.Exception.Safe
 import Control.Monad.Extra
 import Control.Monad.Except
 import Control.Monad.Trans.Except
-import           Data.Function
-import           Data.Ord
 import qualified Data.Text as T
 import           Data.IORef
 import           Data.List.Extra
@@ -67,6 +77,9 @@ import           Data.Maybe
 import           Data.Tuple.Extra
 import qualified Data.Map.Strict                          as Map
 import           System.FilePath
+import           System.Directory
+import           System.IO.Extra
+import Data.Either.Extra (maybeToEither)
 
 
 -- | Given a string buffer, return the string (after preprocessing) and the 'ParsedModule'.
@@ -78,7 +91,7 @@ parseModule
     -> IO (IdeResult (StringBuffer, ParsedModule))
 parseModule IdeOptions{..} env filename mbContents =
     fmap (either (, Nothing) id) $
-    runGhcEnv env $ runExceptT $ do
+    evalGhcEnv env $ runExceptT $ do
         (contents, dflags) <- preprocessor filename mbContents
         (diag, modu) <- parseFileContents optPreprocessor dflags filename contents
         return (diag, Just (contents, modu))
@@ -92,34 +105,39 @@ computePackageDeps
 computePackageDeps env pkg = do
     let dflags = hsc_dflags env
     case lookupInstalledPackage dflags pkg of
-        Nothing -> return $ Left [ideErrorText (toNormalizedFilePath noFilePath) $
+        Nothing -> return $ Left [ideErrorText (toNormalizedFilePath' noFilePath) $
             T.pack $ "unknown package: " ++ show pkg]
         Just pkgInfo -> return $ Right $ depends pkgInfo
 
+typecheckModule :: IdeDefer
+                -> HscEnv
+                -> [(ModSummary, (ModIface, Maybe Linkable))]
+                -> ParsedModule
+                -> IO (IdeResult (HscEnv, TcModuleResult))
+typecheckModule (IdeDefer defer) hsc depsIn pm = do
+    fmap (either (, Nothing) (second Just) . fmap sequence . sequence) $
+      runGhcEnv hsc $
+      catchSrcErrors "typecheck" $ do
+        -- Currently GetDependencies returns things in topological order so A comes before B if A imports B.
+        -- We need to reverse this as GHC gets very unhappy otherwise and complains about broken interfaces.
+        -- Long-term we might just want to change the order returned by GetDependencies
+        let deps = reverse depsIn
 
--- | Typecheck a single module using the supplied dependencies and packages.
-typecheckModule
-    :: IdeDefer
-    -> HscEnv
-    -> [TcModuleResult]
-    -> ParsedModule
-    -> IO (IdeResult TcModuleResult)
-typecheckModule (IdeDefer defer) packageState deps pm =
-    let demoteIfDefer = if defer then demoteTypeErrorsToWarnings else id
-    in
-    fmap (either (, Nothing) (second Just)) $
-    runGhcEnv packageState $
-        catchSrcErrors "typecheck" $ do
-            setupEnv deps
-            let modSummary = pm_mod_summary pm
-                dflags = ms_hspp_opts modSummary
-            modSummary' <- initPlugins modSummary
-            (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
-                GHC.typecheckModule $ enableTopLevelWarnings
-                                    $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
-            tcm2 <- mkTcModuleResult tcm
-            let errorPipeline = unDefer . hideDiag dflags
-            return (map errorPipeline warnings, tcm2)
+        setupFinderCache (map fst deps)
+
+        let modSummary = pm_mod_summary pm
+            dflags = ms_hspp_opts modSummary
+
+        mapM_ (uncurry loadDepModule . snd) deps
+        modSummary' <- initPlugins modSummary
+        (warnings, tcm) <- withWarnings "typecheck" $ \tweak ->
+            GHC.typecheckModule $ enableTopLevelWarnings
+                                $ demoteIfDefer pm{pm_mod_summary = tweak modSummary'}
+        tcm2 <- mkTcModuleResult tcm
+        let errorPipeline = unDefer . hideDiag dflags
+        return (map errorPipeline warnings, tcm2)
+    where
+        demoteIfDefer = if defer then demoteTypeErrorsToWarnings else id
 
 initPlugins :: GhcMonad m => ModSummary -> m ModSummary
 initPlugins modSummary = do
@@ -131,18 +149,25 @@ initPlugins modSummary = do
     return modSummary
 #endif
 
+-- | Whether we should run the -O0 simplifier when generating core.
+--
+-- This is required for template Haskell to work but we disable this in DAML.
+-- See #256
+newtype RunSimplifier = RunSimplifier Bool
+
 -- | Compile a single type-checked module to a 'CoreModule' value, or
 -- provide errors.
 compileModule
-    :: HscEnv
-    -> [TcModuleResult]
+    :: RunSimplifier
+    -> HscEnv
+    -> [(ModSummary, HomeModInfo)]
     -> TcModuleResult
     -> IO (IdeResult (SafeHaskellMode, CgGuts, ModDetails))
-compileModule packageState deps tmr =
+compileModule (RunSimplifier simplify) packageState deps tmr =
     fmap (either (, Nothing) (second Just)) $
-    runGhcEnv packageState $
+    evalGhcEnv packageState $
         catchSrcErrors "compile" $ do
-            setupEnv (deps ++ [tmr])
+            setupEnv (deps ++ [(tmrModSummary tmr, tmrModInfo tmr)])
 
             let tm = tmrModule tmr
             session <- getSession
@@ -152,21 +177,22 @@ compileModule packageState deps tmr =
                 let tm' = tm{tm_parsed_module  = pm'}
                 GHC.dm_core_module <$> GHC.desugarModule tm'
             let tc_result = fst (tm_internals_ (tmrModule tmr))
-            -- Have to call the simplifier on the code even if we are at
-            -- -O0 as otherwise the code generation fails which leads to
-            -- errors like #256
-            plugins <- liftIO $ readIORef (tcg_th_coreplugins tc_result)
-            desugared_guts <- liftIO $ hscSimplify session plugins desugar
+            desugared_guts <-
+                if simplify
+                    then do
+                        plugins <- liftIO $ readIORef (tcg_th_coreplugins tc_result)
+                        liftIO $ hscSimplify session plugins desugar
+                    else pure desugar
             -- give variables unique OccNames
             (guts, details) <- liftIO $ tidyProgram session desugared_guts
             return (map snd warnings, (mg_safe_haskell desugar, guts, details))
 
-generateByteCode :: HscEnv -> [TcModuleResult] -> TcModuleResult -> CgGuts -> IO (IdeResult Linkable)
+generateByteCode :: HscEnv -> [(ModSummary, HomeModInfo)] -> TcModuleResult -> CgGuts -> IO (IdeResult Linkable)
 generateByteCode hscEnv deps tmr guts =
     fmap (either (, Nothing) (second Just)) $
-    runGhcEnv hscEnv $
+    evalGhcEnv hscEnv $
       catchSrcErrors "bytecode" $ do
-          setupEnv (deps ++ [tmr])
+          setupEnv (deps ++ [(tmrModSummary tmr, tmrModInfo tmr)])
           session <- getSession
           (warnings, (_, bytecode, sptEntries)) <- withWarnings "bytecode" $ \tweak ->
 #if MIN_GHC_API_VERSION(8,10,0)
@@ -234,28 +260,80 @@ mkTcModuleResult
     -> m TcModuleResult
 mkTcModuleResult tcm = do
     session <- getSession
+    let sf = modInfoSafe (tm_checked_module_info tcm)
 #if MIN_GHC_API_VERSION(8,10,0)
-    iface <- liftIO $ mkIfaceTc session Sf_None details tcGblEnv
+    iface <- liftIO $ mkIfaceTc session sf details tcGblEnv
 #else
-    (iface, _) <- liftIO $ mkIfaceTc session Nothing Sf_None details tcGblEnv
+    (iface, _) <- liftIO $ mkIfaceTc session Nothing sf details tcGblEnv
 #endif
     let mod_info = HomeModInfo iface details Nothing
     return $ TcModuleResult tcm mod_info
   where
     (tcGblEnv, details) = tm_internals_ tcm
 
+atomicFileWrite :: FilePath -> (FilePath -> IO a) -> IO ()
+atomicFileWrite targetPath write = do
+  let dir = takeDirectory targetPath
+  createDirectoryIfMissing True dir
+  (tempFilePath, cleanUp) <- newTempFileWithin dir
+  (write tempFilePath >> renameFile tempFilePath targetPath) `onException` cleanUp
+
+generateAndWriteHieFile :: HscEnv -> TypecheckedModule -> IO [FileDiagnostic]
+generateAndWriteHieFile hscEnv tcm =
+  handleGenerationErrors dflags "extended interface generation" $ do
+    case tm_renamed_source tcm of
+      Just rnsrc -> do
+        hf <- runHsc hscEnv $
+          GHC.mkHieFile mod_summary (fst $ tm_internals_ tcm) rnsrc ""
+        atomicFileWrite targetPath $ flip GHC.writeHieFile hf
+      _ ->
+        return ()
+  where
+    dflags       = hsc_dflags hscEnv
+    mod_summary  = pm_mod_summary $ tm_parsed_module tcm
+    mod_location = ms_location mod_summary
+    targetPath   = Compat.ml_hie_file mod_location
+
+generateAndWriteHiFile :: HscEnv -> TcModuleResult -> IO [FileDiagnostic]
+generateAndWriteHiFile hscEnv tc =
+  handleGenerationErrors dflags "interface generation" $ do
+    atomicFileWrite targetPath $ \fp ->
+      writeIfaceFile dflags fp modIface
+  where
+    modIface = hm_iface $ tmrModInfo tc
+    modSummary = tmrModSummary tc
+    targetPath = withBootSuffix $ ml_hi_file $ ms_location $ tmrModSummary tc
+    withBootSuffix = case ms_hsc_src modSummary of
+                HsBootFile -> addBootSuffix
+                _ -> id
+    dflags = hsc_dflags hscEnv
+
+handleGenerationErrors :: DynFlags -> T.Text -> IO () -> IO [FileDiagnostic]
+handleGenerationErrors dflags source action =
+  action >> return [] `catches`
+    [ Handler $ return . diagFromGhcException source dflags
+    , Handler $ return . diagFromString source DsError (noSpan "<internal>")
+    . (("Error during " ++ T.unpack source) ++) . show @SomeException
+    ]
+
+
 -- | Setup the environment that GHC needs according to our
 -- best understanding (!)
-setupEnv :: GhcMonad m => [TcModuleResult] -> m ()
-setupEnv tmsIn = do
-    -- if both a .hs-boot file and a .hs file appear here, we want to make sure that the .hs file
-    -- takes precedence, so put the .hs-boot file earlier in the list
-    let isSourceFile = (==HsBootFile) . ms_hsc_src . pm_mod_summary . tm_parsed_module . tmrModule
-        tms = sortBy (compare `on` Down . isSourceFile) tmsIn
+--
+-- This involves setting up the finder cache and populating the
+-- HPT.
+setupEnv :: GhcMonad m => [(ModSummary, HomeModInfo)] -> m ()
+setupEnv tms = do
+    setupFinderCache (map fst tms)
+    -- load dependent modules, which must be in topological order.
+    modifySession $ \e ->
+      foldl' (\e (_, hmi) -> loadModuleHome hmi e) e tms
 
+-- | Initialise the finder cache, dependencies should be topologically
+-- sorted.
+setupFinderCache :: GhcMonad m => [ModSummary] -> m ()
+setupFinderCache mss = do
     session <- getSession
-
-    let mss = map (pm_mod_summary . tm_parsed_module . tmrModule) tms
 
     -- set the target and module graph in the session
     let graph = mkModuleGraph mss
@@ -275,26 +353,40 @@ setupEnv tmsIn = do
     newFinderCacheVar <- liftIO $ newIORef $! newFinderCache
     modifySession $ \s -> s { hsc_FC = newFinderCacheVar }
 
-    -- load dependent modules, which must be in topological order.
-    mapM_ loadModuleHome tms
-
 
 -- | Load a module, quickly. Input doesn't need to be desugared.
 -- A module must be loaded before dependent modules can be typechecked.
 -- This variant of loadModuleHome will *never* cause recompilation, it just
 -- modifies the session.
+--
+-- The order modules are loaded is important when there are hs-boot files.
+-- In particular you should make sure to load the .hs version of a file after the
+-- .hs-boot version.
 loadModuleHome
-    :: (GhcMonad m)
-    => TcModuleResult
-    -> m ()
-loadModuleHome tmr = modifySession $ \e ->
-    e { hsc_HPT = addToHpt (hsc_HPT e) mod mod_info }
-  where
-    ms       = pm_mod_summary . tm_parsed_module . tmrModule $ tmr
-    mod_info = tmrModInfo tmr
-    mod      = ms_mod_name ms
+    :: HomeModInfo
+    -> HscEnv
+    -> HscEnv
+loadModuleHome mod_info e =
+    e { hsc_HPT = addToHpt (hsc_HPT e) mod_name mod_info }
+    where
+      mod_name = moduleName $ mi_module $ hm_iface mod_info
 
+-- | Load module interface.
+loadDepModuleIO :: ModIface -> Maybe Linkable -> HscEnv -> IO HscEnv
+loadDepModuleIO iface linkable hsc = do
+    details <- liftIO $ fixIO $ \details -> do
+        let hsc' = hsc { hsc_HPT = addToHpt (hsc_HPT hsc) mod (HomeModInfo iface details linkable) }
+        initIfaceLoad hsc' (typecheckIface iface)
+    let mod_info = HomeModInfo iface details linkable
+    return $ loadModuleHome mod_info hsc
+    where
+      mod = moduleName $ mi_module iface
 
+loadDepModule :: GhcMonad m => ModIface -> Maybe Linkable -> m ()
+loadDepModule iface linkable = do
+  e <- getSession
+  e' <- liftIO $ loadDepModuleIO iface linkable e
+  setSession e'
 
 -- | GhcMonad function to chase imports of a module given as a StringBuffer. Returns given module's
 -- name and its imports.
@@ -414,3 +506,30 @@ loadHieFile f = do
         u <- mkSplitUniqSupply 'a'
         let nameCache = initNameCache u []
         fmap (GHC.hie_file_result . fst) $ GHC.readHieFile nameCache f
+
+-- | Retuns an up-to-date module interface if available.
+--   Assumes file exists.
+--   Requires the 'HscEnv' to be set up with dependencies
+loadInterface
+  :: HscEnv
+  -> ModSummary
+  -> [HiFileResult]
+  -> IO (Either String ModIface)
+loadInterface session ms deps = do
+  let hiFile = case ms_hsc_src ms of
+                HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
+                _ -> ml_hi_file $ ms_location ms
+  r <- initIfaceLoad session $ readIface (ms_mod ms) hiFile
+  case r of
+    Maybes.Succeeded iface -> do
+      session' <- foldM (\e d -> loadDepModuleIO (hirModIface d) Nothing e) session deps
+      (reason, iface') <- checkOldIface session' ms SourceUnmodified (Just iface)
+      return $ maybeToEither (showReason reason) iface'
+    Maybes.Failed err -> do
+      let errMsg = showSDoc (hsc_dflags session) err
+      return $ Left errMsg
+
+showReason :: RecompileRequired -> String
+showReason MustCompile = "Stale"
+showReason (RecompBecause reason) = "Stale (" ++ reason ++ ")"
+showReason UpToDate = "Up to date"

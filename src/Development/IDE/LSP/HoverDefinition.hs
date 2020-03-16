@@ -6,6 +6,9 @@
 module Development.IDE.LSP.HoverDefinition
     ( setHandlersHover
     , setHandlersDefinition
+    -- * For haskell-language-server
+    , hover
+    , gotoDefinition
     ) where
 
 import           Development.IDE.Core.Rules
@@ -52,7 +55,7 @@ request label getResults notFound found ide (TextDocumentPositionParams (TextDoc
 
 logAndRunRequest :: T.Text -> (NormalizedFilePath -> Position -> Action b) -> IdeState -> Position -> String -> IO b
 logAndRunRequest label getResults ide pos path = do
-  let filePath = toNormalizedFilePath path
+  let filePath = toNormalizedFilePath' path
   logInfo (ideLogger ide) $
     label <> " request at position " <> T.pack (showPosition pos) <>
     " in file: " <> T.pack path

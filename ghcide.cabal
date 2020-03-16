@@ -30,6 +30,7 @@ library
     default-language:   Haskell2010
     build-depends:
         aeson,
+        array,
         async,
         base == 4.*,
         binary,
@@ -43,8 +44,8 @@ library
         filepath,
         haddock-library >= 1.8,
         hashable,
-        haskell-lsp-types == 0.20.*,
-        haskell-lsp == 0.20.*,
+        haskell-lsp-types == 0.21.*,
+        haskell-lsp == 0.21.*,
         mtl,
         network-uri,
         prettyprinter-ansi-terminal,
@@ -111,7 +112,9 @@ library
         Development.IDE.GHC.Error
         Development.IDE.GHC.Util
         Development.IDE.Import.DependencyInformation
+        Development.IDE.LSP.HoverDefinition
         Development.IDE.LSP.LanguageServer
+        Development.IDE.LSP.Outline
         Development.IDE.LSP.Protocol
         Development.IDE.LSP.Server
         Development.IDE.Spans.Common
@@ -131,9 +134,7 @@ library
         Development.IDE.GHC.Orphans
         Development.IDE.GHC.Warnings
         Development.IDE.Import.FindImports
-        Development.IDE.LSP.HoverDefinition
         Development.IDE.LSP.Notifications
-        Development.IDE.LSP.Outline
         Development.IDE.Spans.AtPoint
         Development.IDE.Spans.Calculate
         Development.IDE.Spans.Documentation
@@ -143,6 +144,9 @@ library
         Development.IDE.Plugin.CodeAction.RuleTypes
         Development.IDE.Plugin.Completions.Logic
         Development.IDE.Plugin.Completions.Types
+    if impl(ghc > 8.7) || flag(ghc-lib)
+      other-modules:
+        Development.IDE.GHC.HieAst
     ghc-options: -Wall -Wno-name-shadowing
 
 executable ghcide-test-preprocessor
@@ -183,6 +187,7 @@ executable ghcide
         directory,
         extra,
         filepath,
+        ghc-check >= 0.1.0.3,
         ghc-paths,
         ghc,
         gitrev,
@@ -200,6 +205,7 @@ executable ghcide
         Paths_ghcide
         Rules
         RuleTypes
+        Util
 
     default-extensions:
         BangPatterns
@@ -245,16 +251,19 @@ test-suite ghcide-tests
         haddock-library,
         haskell-lsp,
         haskell-lsp-types,
+        network-uri,
         lens,
         lsp-test >= 0.8,
         parser-combinators,
         QuickCheck,
         quickcheck-instances,
         rope-utf16-splay,
+        shake,
         tasty,
         tasty-expected-failure,
         tasty-hunit,
         tasty-quickcheck,
+        tasty-rerun,
         text
     hs-source-dirs: test/cabal test/exe test/src
     include-dirs: include

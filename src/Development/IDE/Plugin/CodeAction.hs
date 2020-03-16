@@ -6,7 +6,15 @@
 #include "ghc-api-version.h"
 
 -- | Go to the definition of a variable.
-module Development.IDE.Plugin.CodeAction(plugin) where
+module Development.IDE.Plugin.CodeAction
+    (
+      plugin
+
+    -- * For haskell-language-server
+    , codeAction
+    , codeLens
+    , rulePackageExports
+    ) where
 
 import           Language.Haskell.LSP.Types
 import Control.Monad (join)
@@ -64,7 +72,7 @@ codeAction lsp state (TextDocumentIdentifier uri) _range CodeActionContext{_diag
     -- logInfo (ideLogger ide) $ T.pack $ "Code action req: " ++ show arg
     contents <- LSP.getVirtualFileFunc lsp $ toNormalizedUri uri
     let text = Rope.toText . (_text :: VirtualFile -> Rope.Rope) <$> contents
-        mbFile = toNormalizedFilePath <$> uriToFilePath uri
+        mbFile = toNormalizedFilePath' <$> uriToFilePath uri
     (ideOptions, parsedModule, join -> env) <- runAction state $
       (,,) <$> getIdeOptions
             <*> getParsedModule `traverse` mbFile
@@ -85,7 +93,7 @@ codeLens
     -> IO (Either ResponseError (List CodeLens))
 codeLens _lsp ideState CodeLensParams{_textDocument=TextDocumentIdentifier uri} = do
     fmap (Right . List) $ case uriToFilePath' uri of
-      Just (toNormalizedFilePath -> filePath) -> do
+      Just (toNormalizedFilePath' -> filePath) -> do
         _ <- runAction ideState $ runMaybeT $ useE TypeCheck filePath
         diag <- getDiagnostics ideState
         hDiag <- getHiddenDiagnostics ideState
@@ -103,14 +111,14 @@ executeAddSignatureCommand
     :: LSP.LspFuncs c
     -> IdeState
     -> ExecuteCommandParams
-    -> IO (Value, Maybe (ServerMethod, ApplyWorkspaceEditParams))
+    -> IO (Either ResponseError Value, Maybe (ServerMethod, ApplyWorkspaceEditParams))
 executeAddSignatureCommand _lsp _ideState ExecuteCommandParams{..}
     | _command == "typesignature.add"
     , Just (List [edit]) <- _arguments
     , Success wedit <- fromJSON edit
-    = return (Null, Just (WorkspaceApplyEdit, ApplyWorkspaceEditParams wedit))
+    = return (Right Null, Just (WorkspaceApplyEdit, ApplyWorkspaceEditParams wedit))
     | otherwise
-    = return (Null, Nothing)
+    = return (Right Null, Nothing)
 
 suggestAction
   :: Maybe DynFlags

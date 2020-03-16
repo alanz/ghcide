@@ -64,6 +64,10 @@ The `ghcide` executable mostly relies on [`hie-bios`](https://github.com/mpicker
 
 If you can't get `ghcide` working outside the editor, see [this setup troubleshooting guide](docs/Setup.md). Once you have got `ghcide` working outside the editor, the next step is to pick which editor to integrate with.
 
+### Optimal project setup
+
+`ghcide` has been designed to handle projects with hundreds or thousands of modules. If `ghci` can handle it, then `ghcide` should be able to handle it. The only caveat is that this currently requires GHC >= 8.6, and that the first time a module is loaded in the editor will trigger generation of support files in the background if those do not already exist.
+
 ### Using with VS Code
 
 You can install the VSCode extension from the [VSCode
@@ -253,6 +257,13 @@ using `stack install ghcide` within a project.
 To build and work on `ghcide` itself, you can use Stack or cabal, e.g.,
 running `stack test` will execute the test suite.
 If you are using Windows, you should disable the `auto.crlf` setting and configure your editor to use LF line endings, directly or making it use the existing `.editor-config`.
+
+If you are chasing down test failures, you can use the tasty-rerun feature by running tests as
+
+    stack --stack-yaml=stack84.yaml test --test-arguments "--rerun"
+
+This writes a log file called `.tasty-rerun-log` of the failures, and only runs those.
+See the [tasty-rerun](https://hackage.haskell.org/package/tasty-rerun-1.1.17/docs/Test-Tasty-Ingredients-Rerun.html) documentation for other options.
 
 ### Building the extension
 

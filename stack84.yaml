@@ -5,9 +5,9 @@ packages:
 extra-deps:
 - aeson-1.4.6.0
 - base-orphans-0.8.2
-- haskell-lsp-0.20.0.0
-- haskell-lsp-types-0.20.0.0
-- lsp-test-0.10.1.0
+- haskell-lsp-0.21.0.0
+- haskell-lsp-types-0.21.0.0
+- lsp-test-0.10.2.0
 - rope-utf16-splay-0.3.1.0
 - filepattern-0.1.1
 - js-dgtable-0.5.2
@@ -22,5 +22,13 @@ extra-deps:
 - unordered-containers-0.2.10.0
 - file-embed-0.0.11.2
 - heaps-0.3.6.1
+- ghc-check-0.1.0.3
+
+# For tasty-retun
+- ansi-terminal-0.10.3
+- ansi-wl-pprint-0.6.9
+- tasty-1.2.3
+- tasty-rerun-1.1.17
+
 nix:
   packages: [zlib]

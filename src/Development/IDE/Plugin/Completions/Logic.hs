@@ -132,7 +132,7 @@ occNameToComKind ty oc
 
 mkCompl :: IdeOptions -> CompItem -> CompletionItem
 mkCompl IdeOptions{..} CI{origName,importedFrom,thingType,label,isInfix,docs} =
-  CompletionItem label kind ((colon <>) <$> typeText)
+  CompletionItem label kind (List []) ((colon <>) <$> typeText)
     (Just $ CompletionDocMarkup $ MarkupContent MkMarkdown $ T.intercalate sectionSeparator docs')
     Nothing Nothing Nothing Nothing (Just insertText) (Just Snippet)
     Nothing Nothing Nothing Nothing Nothing
@@ -186,13 +186,13 @@ getArgText typ = argText
 
 mkModCompl :: T.Text -> CompletionItem
 mkModCompl label =
-  CompletionItem label (Just CiModule) Nothing
+  CompletionItem label (Just CiModule) (List []) Nothing
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing
 
 mkImportCompl :: T.Text -> T.Text -> CompletionItem
 mkImportCompl enteredQual label =
-  CompletionItem m (Just CiModule) (Just label)
+  CompletionItem m (Just CiModule) (List []) (Just label)
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing
   where
@@ -200,19 +200,20 @@ mkImportCompl enteredQual label =
 
 mkExtCompl :: T.Text -> CompletionItem
 mkExtCompl label =
-  CompletionItem label (Just CiKeyword) Nothing
+  CompletionItem label (Just CiKeyword) (List []) Nothing
     Nothing Nothing Nothing Nothing Nothing Nothing Nothing
     Nothing Nothing Nothing Nothing Nothing
 
 mkPragmaCompl :: T.Text -> T.Text -> CompletionItem
 mkPragmaCompl label insertText =
-  CompletionItem label (Just CiKeyword) Nothing
+  CompletionItem label (Just CiKeyword) (List []) Nothing
     Nothing Nothing Nothing Nothing Nothing (Just insertText) (Just Snippet)
     Nothing Nothing Nothing Nothing Nothing
 
-cacheDataProducer :: HscEnv -> DynFlags -> TypecheckedModule -> [ParsedModule] -> IO CachedCompletions
-cacheDataProducer packageState dflags tm deps = do
+cacheDataProducer :: HscEnv -> TypecheckedModule -> [ParsedModule] -> IO CachedCompletions
+cacheDataProducer packageState tm deps = do
   let parsedMod = tm_parsed_module tm
+      dflags = hsc_dflags packageState
       curMod = moduleName $ ms_mod $ pm_mod_summary parsedMod
       Just (_,limports,_,_) = tm_renamed_source tm
 
@@ -269,18 +270,18 @@ cacheDataProducer packageState dflags tm deps = do
         let typ = Just $ varType var
             name = Var.varName var
             label = T.pack $ showGhc name
-        docs <- runGhcEnv packageState $ getDocumentationTryGhc (tm_parsed_module tm : deps) name
+        docs <- evalGhcEnv packageState $ getDocumentationTryGhc (tm_parsed_module tm : deps) name
         return $ CI name (showModName curMod) typ label Nothing docs
 
       toCompItem :: ModuleName -> Name -> IO CompItem
       toCompItem mn n = do
-        docs <- runGhcEnv packageState $ getDocumentationTryGhc (tm_parsed_module tm : deps) n
+        docs <- evalGhcEnv packageState $ getDocumentationTryGhc (tm_parsed_module tm : deps) n
 -- lookupName uses runInteractiveHsc, i.e., GHCi stuff which does not work with GHCi
 -- and leads to fun errors like "Cannot continue after interface file error".
 #ifdef GHC_LIB
         let ty = Right Nothing
 #else
-        ty <- runGhcEnv packageState $ catchSrcErrors "completion" $ do
+        ty <- evalGhcEnv packageState $ catchSrcErrors "completion" $ do
                 name' <- lookupName n
                 return $ name' >>= safeTyThingType
 #endif
@@ -306,15 +307,12 @@ toggleSnippets ClientCapabilities { _textDocument } (WithSnippets with) x
   where supported = Just True == (_textDocument >>= _completion >>= _completionItem >>= _snippetSupport)
 
 -- | Returns the cached completions for the given module and position.
-getCompletions :: IdeOptions -> CachedCompletions -> TypecheckedModule -> VFS.PosPrefixInfo -> ClientCapabilities -> WithSnippets -> IO [CompletionItem]
+getCompletions :: IdeOptions -> CachedCompletions -> ParsedModule -> VFS.PosPrefixInfo -> ClientCapabilities -> WithSnippets -> IO [CompletionItem]
 getCompletions ideOpts CC { allModNamesAsNS, unqualCompls, qualCompls, importableModules }
-               tm prefixInfo caps withSnippets = do
+               pm prefixInfo caps withSnippets = do
   let VFS.PosPrefixInfo { VFS.fullLine, VFS.prefixModule, VFS.prefixText } = prefixInfo
       enteredQual = if T.null prefixModule then "" else prefixModule <> "."
       fullPrefix  = enteredQual <> prefixText
-
-      -- default to value context if no explicit context
-      context = fromMaybe ValueContext $ getCContext pos (tm_parsed_module tm)
 
       {- correct the position by moving 'foo :: Int -> String ->    '
                                                                     ^
@@ -344,10 +342,11 @@ getCompletions ideOpts CC { allModNamesAsNS, unqualCompls, qualCompls, importabl
         where
           isTypeCompl = isTcOcc . occName . origName
           -- completions specific to the current context
-          ctxCompls' = case context of
-                        TypeContext -> filter isTypeCompl compls
-                        ValueContext -> filter (not . isTypeCompl) compls
-                        _ -> filter (not . isTypeCompl) compls
+          ctxCompls' = case getCContext pos pm of
+                        Nothing -> compls
+                        Just TypeContext -> filter isTypeCompl compls
+                        Just ValueContext -> filter (not . isTypeCompl) compls
+                        Just _ -> filter (not . isTypeCompl) compls
           -- Add whether the text to insert has backticks
           ctxCompls = map (\comp -> comp { isInfix = infixCompls }) ctxCompls'
 
@@ -373,7 +372,9 @@ getCompletions ideOpts CC { allModNamesAsNS, unqualCompls, qualCompls, importabl
       filtImportCompls = filtListWith (mkImportCompl enteredQual) importableModules
       filtPragmaCompls = filtListWithSnippet mkPragmaCompl validPragmas
       filtOptsCompls   = filtListWith mkExtCompl
-      filtKeywordCompls = if T.null prefixModule then filtListWith mkExtCompl keywords else []
+      filtKeywordCompls
+          | T.null prefixModule = filtListWith mkExtCompl (optKeywords ideOpts)
+          | otherwise = []
 
       stripLeading :: Char -> String -> String
       stripLeading _ [] = []
@@ -526,25 +527,4 @@ prefixes =
   , "$t"
   , "$c"
   , "$m"
-  ]
-
-keywords :: [T.Text]
-keywords =
-  [
-    -- From https://wiki.haskell.org/Keywords
-    "as"
-  , "case", "of"
-  , "class", "instance", "type"
-  , "data", "family", "newtype"
-  , "default"
-  , "deriving"
-  , "do", "mdo", "proc", "rec"
-  , "forall"
-  , "foreign"
-  , "hiding"
-  , "if", "then", "else"
-  , "import", "qualified", "hiding"
-  , "infix", "infixl", "infixr"
-  , "let", "in", "where"
-  , "module"
   ]

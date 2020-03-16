@@ -35,6 +35,7 @@ import Development.IDE.Plugin.Completions as Completions
 import Development.IDE.Plugin.CodeAction as CodeAction
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Language.Haskell.LSP.Core as LSP
 import Language.Haskell.LSP.Messages
 import Language.Haskell.LSP.Types (LspId(IdInt))
 import Data.Version
@@ -84,18 +85,22 @@ main = do
     let plugins = Completions.plugin <> CodeAction.plugin
         onInitialConfiguration = const $ Right ()
         onConfigurationChange  = const $ Right ()
+        options = def { LSP.executeCommandCommands = Just ["typesignature.add"]
+                      , LSP.completionTriggerCharacters = Just "."
+                      }
 
     if argLSP then do
         t <- offsetTime
         hPutStrLn stderr "Starting LSP server..."
         hPutStrLn stderr "If you are seeing this in a terminal, you probably should have run ghcide WITHOUT the --lsp option!"
-        runLanguageServer def (pluginHandler plugins) onInitialConfiguration onConfigurationChange $ \getLspId event vfs caps -> do
+        runLanguageServer options (pluginHandler plugins) onInitialConfiguration onConfigurationChange $ \getLspId event vfs caps -> do
             t <- t
             hPutStrLn stderr $ "Started LSP server in " ++ showDuration t
             let options = (defaultIdeOptions $ loadSession dir)
                     { optReportProgress = clientSupportsProgress caps
                     , optShakeProfiling = argsShakeProfiling
                     , optTesting        = argsTesting
+                    , optInterfaceLoadingDiagnostics = argsTesting
                     }
             debouncer <- newAsyncDebouncer
             initialise caps (cradleRules >> mainRule >> pluginRules plugins >> action kick)
@@ -142,8 +147,8 @@ main = do
         ide <- initialise def (cradleRules >> mainRule) (pure $ IdInt 0) (showEvent lock) (logger Info) noopDebouncer options vfs
 
         putStrLn "\nStep 6/6: Type checking the files"
-        setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath files
-        results <- runActionSync ide $ uses TypeCheck $ map toNormalizedFilePath files
+        setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
+        results <- runActionSync ide $ uses TypeCheck $ map toNormalizedFilePath' files
         let (worked, failed) = partition fst $ zip (map isJust results) files
         when (failed /= []) $
             putStr $ unlines $ "Files that failed:" : map ((++) " * " . snd) failed
@@ -179,7 +184,7 @@ kick = do
 -- | Print an LSP event.
 showEvent :: Lock -> FromServerMessage -> IO ()
 showEvent _ (EventFileDiagnostics _ []) = return ()
-showEvent lock (EventFileDiagnostics (toNormalizedFilePath -> file) diags) =
+showEvent lock (EventFileDiagnostics (toNormalizedFilePath' -> file) diags) =
     withLock lock $ T.putStrLn $ showDiagnosticsColored $ map (file,ShowDiag,) diags
 showEvent lock e = withLock lock $ print e
 
@@ -195,7 +200,7 @@ loadSession dir = liftIO $ do
     let session :: Maybe FilePath -> Action HscEnvEq
         session file = do
           -- In the absence of a cradle file, just pass the directory from where to calculate an implicit cradle
-          let cradle = toNormalizedFilePath $ fromMaybe dir file
+          let cradle = toNormalizedFilePath' $ fromMaybe dir file
           use_ LoadCradle cradle
     return $ \file -> session =<< liftIO (cradleLoc file)
 
