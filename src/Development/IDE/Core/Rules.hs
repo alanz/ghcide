@@ -59,6 +59,7 @@ import           Development.IDE.GHC.Error
 import           Development.Shake                        hiding (Diagnostic)
 import Development.IDE.Core.RuleTypes
 import Development.IDE.Spans.Type
+import qualified Data.ByteString.Char8 as BS
 
 import qualified GHC.LanguageExtensions as LangExt
 import HscTypes
@@ -205,11 +206,13 @@ getLocatedImportsRule =
         pm <- use_ GetParsedModule file
         let ms = pm_mod_summary pm
         let imports = [(False, imp) | imp <- ms_textual_imps ms] ++ [(True, imp) | imp <- ms_srcimps ms]
-        env <- hscEnv <$> use_ GhcSession file
+        env_eq <- use_ GhcSession file
+        let env = hscEnv env_eq
+        let import_dirs = map (importPaths . snd ) (deps env_eq)
         let dflags = addRelativeImport file pm $ hsc_dflags env
         opt <- getIdeOptions
         (diags, imports') <- fmap unzip $ forM imports $ \(isSource, (mbPkgName, modName)) -> do
-            diagOrImp <- locateModule dflags (optExtensions opt) getFileExists modName mbPkgName isSource
+            diagOrImp <- locateModule dflags import_dirs (optExtensions opt) getFileExists modName mbPkgName isSource
             case diagOrImp of
                 Left diags -> pure (diags, Left (modName, Nothing))
                 Right (FileImport path) -> pure ([], Left (modName, Just path))
@@ -361,6 +364,7 @@ typeCheckRule = define $ \TypeCheck file ->
 data GenerateInterfaceFiles
     = DoGenerateInterfaceFiles
     | SkipGenerationOfInterfaceFiles
+    deriving Show
 
 -- This is factored out so it can be directly called from the GetModIface
 -- rule. Directly calling this rule means that on the initial load we can
@@ -388,7 +392,7 @@ typeCheckRuleDefinition file generateArtifacts = do
   setPriority priorityTypeCheck
   IdeOptions { optDefer = defer } <- getIdeOptions
 
-  liftIO $ do
+  addUsageDependencies $ liftIO $ do
     res <- typecheckModule defer hsc (zipWith unpack mirs bytecodes) pm
     case res of
       (diags, Just (hsc,tcm)) | DoGenerateInterfaceFiles <- generateArtifacts -> do
@@ -401,6 +405,18 @@ typeCheckRuleDefinition file generateArtifacts = do
   unpack HiFileResult{..} bc = (hirModSummary, (hirModIface, bc))
   uses_th_qq dflags =
     xopt LangExt.TemplateHaskell dflags || xopt LangExt.QuasiQuotes dflags
+
+  addUsageDependencies :: Action (a, Maybe TcModuleResult) -> Action (a, Maybe TcModuleResult)
+  addUsageDependencies a = do
+    r@(_, mtc) <- a
+    forM_ mtc $ \tc -> do
+      let used_files = mapMaybe udep (mi_usages (hm_iface (tmrModInfo tc)))
+          udep (UsageFile fp _h) = Just fp
+          udep _ = Nothing
+      -- Add a dependency on these files which are added by things like
+      -- qAddDependentFile
+      mapM_ doesFileExist used_files
+    return r
 
 
 generateCore :: NormalizedFilePath -> Action (IdeResult (SafeHaskellMode, CgGuts, ModDetails))
@@ -444,11 +460,17 @@ loadGhcSession = do
     defineNoFile $ \GhcSessionIO -> do
         opts <- getIdeOptions
         GhcSessionFun <$> optGhcSession opts
+    -- This function should always be rerun because it consults a cache to
+    -- see what HscEnv needs to be used for the file, which can change.
+    -- However, it should also cut-off early if it's the same HscEnv as
+    -- last time
     defineEarlyCutoff $ \GhcSession file -> do
         GhcSessionFun fun <- useNoFile_ GhcSessionIO
+        alwaysRerun
         val <- fun $ fromNormalizedFilePath file
-        opts <- getIdeOptions
-        return ("" <$ optShakeFiles opts, ([], Just val))
+        -- TODO: What was this doing before?
+--        opts <- getIdeOptions
+        return (Just (BS.pack $ show $ hash val), ([], Just val))
 
 getHiFileRule :: Rules ()
 getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do

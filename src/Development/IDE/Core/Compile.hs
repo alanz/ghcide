@@ -135,7 +135,7 @@ typecheckModule (IdeDefer defer) hsc depsIn pm = do
         tcm2 <- mkTcModuleResult tcm
         let errorPipeline = unDefer . hideDiag dflags
         return (map errorPipeline warnings, tcm2)
-    where
+     where
         demoteIfDefer = if defer then demoteTypeErrorsToWarnings else id
 
 initPlugins :: GhcMonad m => ModSummary -> m ModSummary
@@ -251,10 +251,11 @@ mkTcModuleResult
     -> m TcModuleResult
 mkTcModuleResult tcm = do
     session <- getSession
+    let sf = modInfoSafe (tm_checked_module_info tcm)
 #if MIN_GHC_API_VERSION(8,10,0)
-    iface <- liftIO $ mkIfaceTc session Sf_None details tcGblEnv
+    iface <- liftIO $ mkIfaceTc session sf details tcGblEnv
 #else
-    (iface, _) <- liftIO $ mkIfaceTc session Nothing Sf_None details tcGblEnv
+    (iface, _) <- liftIO $ mkIfaceTc session Nothing sf details tcGblEnv
 #endif
     let mod_info = HomeModInfo iface details Nothing
     return $ TcModuleResult tcm mod_info
