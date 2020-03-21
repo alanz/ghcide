@@ -472,63 +472,6 @@ loadGhcSession = do
 --        opts <- getIdeOptions
         return (Just (BS.pack $ show $ hash val), ([], Just val))
 
-getHiFileRule :: Rules ()
-getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
-  session <- hscEnv <$> use_ GhcSession f
-  -- get all dependencies interface files, to check for freshness
-  (deps,_) <- use_ GetLocatedImports f
-  depHis  <- traverse (use GetHiFile) (mapMaybe (fmap artifactFilePath . snd) deps)
-
-  -- TODO find the hi file without relying on the parsed module
-  --      it should be possible to construct a ModSummary parsing just the imports
-  --      (see HeaderInfo in the GHC package)
-  pm      <- use_ GetParsedModule f
-  let hiFile = toNormalizedFilePath $
-            case ms_hsc_src ms of
-                HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
-                _ -> ml_hi_file $ ms_location ms
-      ms     = pm_mod_summary pm
-
-  IdeOptions{optInterfaceLoadingDiagnostics} <- getIdeOptions
-
-  let mkInterfaceFilesGenerationDiag f intro
-        | optInterfaceLoadingDiagnostics = mkDiag $ intro <> msg
-        | otherwise = []
-            where
-                msg =
-                    ": additional resource use while generating interface files in the background."
-                mkDiag = pure
-                       . ideErrorWithSource (Just "interface file loading") (Just DsInfo) f
-                       . T.pack
-
-  case sequence depHis of
-    Nothing -> do
-          let d = mkInterfaceFilesGenerationDiag f "Missing interface file dependencies"
-          pure (Nothing, (d, Nothing))
-    Just deps -> do
-      gotHiFile <- getFileExists hiFile
-      if not gotHiFile
-        then do
-          let d = mkInterfaceFilesGenerationDiag f "Missing interface file"
-          pure (Nothing, (d, Nothing))
-        else do
-          hiVersion  <- use_ GetModificationTime hiFile
-          modVersion <- use_ GetModificationTime f
-          let sourceModified = modificationTime hiVersion < modificationTime modVersion
-          if sourceModified
-            then do
-              let d = mkInterfaceFilesGenerationDiag f "Stale interface file"
-              pure (Nothing, (d, Nothing))
-            else do
-              r <- liftIO $ loadInterface session ms deps
-              case r of
-                Right iface -> do
-                  let result = HiFileResult ms iface
-                  return (Just (fingerprintToBS (mi_mod_hash iface)), ([], Just result))
-                Left err -> do
-                  let diag = ideErrorWithSource (Just "interface file loading") (Just DsError) f . T.pack $ err
-                  return (Nothing, (pure diag, Nothing))
-
 
 getModIfaceRule :: Rules ()
 getModIfaceRule = define $ \GetModIface f -> do
@@ -620,39 +563,6 @@ getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
                   let diag = ideErrorWithSource (Just "interface file loading") (Just DsError) f . T.pack $ err
                   return (Nothing, (pure diag, Nothing))
 
-
-getModIfaceRule :: Rules ()
-getModIfaceRule = define $ \GetModIface f -> do
-    fileOfInterest <- use_ IsFileOfInterest f
-    let useHiFile =
-          -- Never load interface files for files of interest
-          not fileOfInterest
-    mbHiFile <- if useHiFile then use GetHiFile f else return Nothing
-    case mbHiFile of
-        Just x ->
-            return ([], Just x)
-        Nothing
-          | fileOfInterest -> do
-            -- For files of interest only, create a Shake dependency on typecheck
-            tmr <- use TypeCheck f
-            return ([], extract tmr)
-          | otherwise -> do
-            -- Otherwise the interface file does not exist or is out of date. Invoke typechecking directly to update it without incurring a dependency on the typecheck rule.
-            (diags, tmr) <- typeCheckRuleDefinition f DoGenerateInterfaceFiles
-            -- Bang pattern is important to avoid leaking 'tmr'
-            let !res = extract tmr
-            return (diags, res)
-    where
-      extract Nothing = Nothing
-      extract (Just tmr) =
-        -- Bang patterns are important to force the inner fields
-        Just $! HiFileResult (tmrModSummary tmr) (hm_iface $ tmrModInfo tmr)
-
-isFileOfInterestRule :: Rules ()
-isFileOfInterestRule = defineEarlyCutoff $ \IsFileOfInterest f -> do
-    filesOfInterest <- getFilesOfInterest
-    let res = f `elem` filesOfInterest
-    return (Just (if res then "1" else ""), ([], Just res))
 
 -- | A rule that wires per-file rules together
 mainRule :: Rules ()
