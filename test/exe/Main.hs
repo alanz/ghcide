@@ -122,7 +122,7 @@ initializeResponseTests = withResource acquire release tests where
         testCase title $ getInitializeResponse >>= \ir -> expected @=? (getActual . innerCaps) ir
 
       che :: TestName -> (InitializeResponseCapabilitiesInner -> Maybe ExecuteCommandOptions) -> Maybe ExecuteCommandOptions -> TestTree
-      che title getActual expected = testCase title doTest
+      che title getActual _expected = testCase title doTest
         where
             doTest = do
                 ir <- getInitializeResponse
