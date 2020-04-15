@@ -350,7 +350,7 @@ lspShakeProgress getLspId sendMsg inProgress = do
                   { _title = "Processing"
                   , _cancellable = Nothing
                   , _message = Nothing
-                  , _percentage = Nothing
+                  , _percentage = Just (0.0)
                   }
                 }
         stop id = sendMsg $ LSP.NotWorkDoneProgressEnd $ LSP.fmServerWorkDoneProgressEndNotification
@@ -374,7 +374,7 @@ lspShakeProgress getLspId sendMsg inProgress = do
                         , _value = LSP.WorkDoneProgressReportParams
                         { _cancellable = Nothing
                         , _message = next
-                        , _percentage = Nothing
+                        , _percentage = Just ((fromIntegral done) / (fromIntegral todo))
                         }
                         }
             loop id next
