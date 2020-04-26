@@ -49,16 +49,12 @@ import Development.IDE.Types.Location
 import Development.IDE.GHC.Compat hiding (parseModule, typecheckModule)
 import Development.IDE.GHC.Util
 import Development.IDE.GHC.WithDynFlags
-import Data.Coerce
 import Data.Either.Extra
 import Data.Maybe
 import           Data.Foldable
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntSet as IntSet
 import Data.List
-import Data.List.NonEmpty (NonEmpty(..))
-import Data.Ord
 import qualified Data.Set                                 as Set
 import qualified Data.HashSet                             as HS
 import qualified Data.Text                                as T
@@ -135,14 +131,6 @@ getDefinition file pos = runMaybeT $ do
     opts <- liftIO $ getIdeOptionsIO ide
     spans <- fst <$> useE GetSpanInfo file
     AtPoint.gotoDefinition (getHieFile ide file) opts (spansExprs spans) pos
-
-getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
-getTypeDefinition file pos = runMaybeT $ do
-    ide <- ask
-    opts <- liftIO $ getIdeOptionsIO ide
-    spans <- fst <$> useE GetSpanInfo file
-    AtPoint.gotoTypeDefinition (getHieFile ide file) opts (spansExprs spans) pos
-
 
 getTypeDefinition :: NormalizedFilePath -> Position -> IdeAction (Maybe Location)
 getTypeDefinition file pos = runMaybeT $ do
@@ -299,6 +287,7 @@ getLocatedImportsRule =
         case sequence pkgImports of
             Nothing -> pure (concat diags, Nothing)
             Just pkgImports -> pure (concat diags, Just (moduleImports, Set.fromList $ concat pkgImports))
+
 
 -- | Given a target file path, construct the raw dependency results by following
 -- imports recursively.
@@ -559,17 +548,8 @@ getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
   depHis  <- traverse (use GetHiFile) (mapMaybe (fmap artifactFilePath . snd) deps)
 
   ms <- use_ GetModSummary f
-<<<<<<< HEAD
-<<<<<<< variant A
   let hiFile = toNormalizedFilePath'
              $ case ms_hsc_src ms of
->>>>>>> variant B
-  let hiFile = case ms_hsc_src ms of
-======= end
-=======
-  let hiFile = toNormalizedFilePath'
-             $ case ms_hsc_src ms of
->>>>>>> c1709ab... Fix build after cherry pick
                 HsBootFile -> addBootSuffix (ml_hi_file $ ms_location ms)
                 _ -> ml_hi_file $ ms_location ms
 
@@ -619,22 +599,6 @@ getHiFileRule = defineEarlyCutoff $ \GetHiFile f -> do
 getModSummaryRule :: Rules ()
 getModSummaryRule = define $ \GetModSummary f -> do
     dflags <- hsc_dflags . hscEnv <$> use_ GhcSession f
-    (_, mFileContent) <- getFileContents f
-    modS <- liftIO $ evalWithDynFlags dflags $ runExceptT $
-        getModSummaryFromImports (fromNormalizedFilePath f) (textToStringBuffer <$> mFileContent)
-    return $ either (,Nothing) (([], ) . Just) modS
-
-failRule :: IdeResult a
-failRule = ([], Nothing)
-
-logStr :: String -> Action ()
-logStr t = do
-    logger <- actionLogger
-    liftIO $ logDebug logger $ T.pack t
-
-getModSummaryRule :: Rules ()
-getModSummaryRule = define $ \GetModSummary f -> do
-    session <- hscEnv <$> use_ GhcSession f
     (_, mFileContent) <- getFileContents f
     modS <- liftIO $ evalWithDynFlags dflags $ runExceptT $
         getModSummaryFromImports (fromNormalizedFilePath f) (textToStringBuffer <$> mFileContent)

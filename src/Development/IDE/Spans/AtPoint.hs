@@ -153,8 +153,7 @@ locationsAtPoint
   -> Position
   -> [SpanInfo]
   -> m [Location]
-locationsAtPoint getHieFile _ideOptions pos =
-    fmap (map srcSpanToLocation) . mapMaybeM (getSpan . spaninfoSource) . spansAtPoint pos
+locationsAtPoint getHieFile = querySpanInfoAt (getSpan . spaninfoSource)
   where getSpan :: SpanSource -> m (Maybe SrcSpan)
         getSpan NoSource = pure Nothing
         getSpan (SpanS sp) = pure $ Just sp
