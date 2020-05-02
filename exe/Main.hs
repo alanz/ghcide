@@ -50,10 +50,10 @@ import qualified System.Directory.Extra as IO
 import System.Environment
 import System.IO
 import System.Exit
-import HIE.Bios.Environment (addCmdOpts)
+import HIE.Bios.Environment (addCmdOpts, makeDynFlagsAbsolute)
 import Paths_ghcide
 import Development.GitRev
-import Development.Shake (Action,  action)
+import Development.Shake (Action)
 import qualified Data.HashSet as HashSet
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Map.Strict as Map
@@ -114,7 +114,7 @@ main = do
     dir <- IO.getCurrentDirectory
     command <- makeLspCommandId "typesignature.add"
 
-    let plugins = Completions.plugin <> CodeAction.plugin
+    let plugins = Completions.plugin -- <> CodeAction.plugin
         onInitialConfiguration = const $ Right ()
         onConfigurationChange  = const $ Right ()
         options = def { LSP.executeCommandCommands = Just [command]
@@ -165,7 +165,7 @@ main = do
 
         putStrLn "\nStep 4/6: Type checking the files"
         setFilesOfInterest ide $ HashSet.fromList $ map toNormalizedFilePath' files
-        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
+--        _ <- runActionSync "TypecheckTest" ide $ uses TypeCheck (map toNormalizedFilePath' files)
 --        results <- runActionSync ide $ use TypeCheck $ toNormalizedFilePath' "src/Development/IDE/Core/Rules.hs"
         {-
         let fp =  toNormalizedFilePath' "ghc/Main.hs"
@@ -488,9 +488,10 @@ memoIO op = do
             Just res -> return (mp, res)
 
 setOptions :: GhcMonad m => ComponentOptions -> DynFlags -> m (DynFlags, [Target])
-setOptions (ComponentOptions theOpts _) dflags = do
+setOptions (ComponentOptions theOpts compRoot _) dflags = do
     cacheDir <- liftIO $ getCacheDir theOpts
-    (dflags', targets) <- addCmdOpts theOpts dflags
+    (dflags_, targets) <- addCmdOpts theOpts dflags
+    let dflags' = makeDynFlagsAbsolute compRoot dflags_
     let dflags'' =
           -- disabled, generated directly by ghcide instead
           flip gopt_unset Opt_WriteInterface $
