@@ -4,6 +4,7 @@ packages:
 extra-deps:
 - haskell-lsp-0.22.0.0
 - haskell-lsp-types-0.22.0.0
+- invariant-0.5.3
 - lsp-test-0.10.3.0
 - hie-bios-0.5.0
 - fuzzy-0.1.0.0
